@@ -229,6 +229,7 @@ async function cmdScan(rawArgs: string[]): Promise<number> {
 		const staticReport = await runStaticPass(manifest.root, {
 			runtimeTools: behavioral?.tools,
 			skipAudit: options.skipAudit,
+			noBehavioral: behavioral === null,
 		});
 
 		const report = assembleReport({

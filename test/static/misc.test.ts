@@ -1,9 +1,12 @@
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { classifyTarget } from "../../src/resolve.js";
 import { resetAuditIds, summarizeAudit } from "../../src/static/audit.js";
 import { extractToolsFromText } from "../../src/static/extract.js";
+import { runStaticPass } from "../../src/static/index.js";
 
 describe("npm audit rollup", () => {
 	it("turns critical/high counts into findings", () => {
@@ -83,5 +86,57 @@ describe("target classification", () => {
 	it("rejects garbage", () => {
 		expect(() => classifyTarget("not a target !!!")).toThrow();
 		expect(() => classifyTarget("")).toThrow();
+	});
+});
+
+describe("no-tools-enumerated coverage finding", () => {
+	async function emptyServerDir(): Promise<string> {
+		const dir = await mkdtemp(join(tmpdir(), "sigil-no-tools-"));
+		await writeFile(
+			join(dir, "package.json"),
+			JSON.stringify({ name: "empty-server", version: "0.0.0" }),
+		);
+		return dir;
+	}
+
+	it("flags major when neither pass enumerated any tools", async () => {
+		const dir = await emptyServerDir();
+		const report = await runStaticPass(dir, {
+			noBehavioral: true,
+			skipAudit: true,
+		});
+		expect(report.toolSource).toBe("none");
+		expect(report.toolCount).toBe(0);
+		const f = report.findings.find((x) => x.id === "st-coverage-1");
+		expect(f).toBeDefined();
+		expect(f!.severity).toBe("major");
+	});
+
+	it("stays silent when the behavioral pass supplied tools", async () => {
+		const dir = await emptyServerDir();
+		const report = await runStaticPass(dir, {
+			noBehavioral: false,
+			skipAudit: true,
+			runtimeTools: [{ name: "t", description: "does things" }],
+		});
+		expect(report.findings.some((x) => x.id === "st-coverage-1")).toBe(false);
+	});
+
+	it("stays silent when extraction found tools", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "sigil-with-tools-"));
+		await writeFile(
+			join(dir, "package.json"),
+			JSON.stringify({ name: "tool-server", version: "0.0.0" }),
+		);
+		await writeFile(
+			join(dir, "server.js"),
+			`server.tool("do-thing", "does a thing", async () => ({}));\n`,
+		);
+		const report = await runStaticPass(dir, {
+			noBehavioral: true,
+			skipAudit: true,
+		});
+		expect(report.toolSource).toBe("extracted");
+		expect(report.findings.some((x) => x.id === "st-coverage-1")).toBe(false);
 	});
 });

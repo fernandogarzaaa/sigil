@@ -28,6 +28,11 @@ export interface StaticPassOptions {
 	readonly skipAudit?: boolean;
 	/** Tools from the live tools/list, when the behavioral pass already ran. */
 	readonly runtimeTools?: readonly RuntimeTool[];
+	/**
+	 * True when the behavioral pass did not run, so no live tools/list is
+	 * available. Used to flag scans where neither pass enumerated any tools.
+	 */
+	readonly noBehavioral?: boolean;
 }
 
 const MAX_FILES = 500;
@@ -82,6 +87,29 @@ export async function runStaticPass(
 		}
 		descriptors = [...seen.values()];
 		toolSource = descriptors.length > 0 ? "extracted" : "none";
+	}
+
+	// When neither pass enumerated a single tool, the capability and
+	// poisoning checks examined nothing. A clean score at this point means
+	// "no tool evidence examined", not "tools verified safe": flag it as a
+	// major finding so the verdict lands at medium (verify further) instead
+	// of low (trust). Source heuristics and the dependency audit still ran.
+	if (toolSource === "none" && options.noBehavioral) {
+		findings.push({
+			id: "st-coverage-1",
+			severity: "major",
+			category: "static.capability",
+			title:
+				"No MCP tools could be enumerated: capability and poisoning checks examined zero tools",
+			description:
+				"The behavioral pass did not run (no live tools/list) and static tool extraction found no tool registrations in the source, so capability classification (including the lethal-trifecta check) and tool-description poisoning scans examined nothing. Source heuristics and the dependency audit still ran. Treat a clean score as 'no tool evidence examined', not 'tools verified safe'.",
+			evidence: [
+				"static.toolSource: none (no runtime tools/list, no extracted registrations)",
+				"behavioral pass did not run",
+			],
+			recommendation:
+				"Enumerate the tool surface another way (start the server and call tools/list) before trusting this verdict.",
+		});
 	}
 
 	findings.push(...checkCapabilities(descriptors));

@@ -93,7 +93,20 @@ Options for `scan`: `--json`, `--sign`, `--key <path>`, `--badge-out <path>`, `-
 
 `verify` also checks the badge against the public trust index (use `--offline` to skip): revoked badges exit 2 with the reason, superseded ones warn.
 
-Exit codes: `0` passed the gate (or the command succeeded), `2` risk at or above `--fail-on` or a revoked badge on verify, `1` operational error.
+**Who signed it.** A valid signature only proves the badge was not altered after signing; anyone can generate a key and sign a "passed" badge. So `verify` also requires the signer to be trusted, in one of these ways:
+
+- its key id is in a trusted-keys list: `--trusted-keys <file>` (repeatable) or `SIGIL_TRUSTED_KEYS` (comma/space separated key ids, or a path to such a file). A file may hold key ids, a JSON array of ids, or `sigil keygen` public-key files (`{keyId, publicKey}`; the id is re-derived from the key so a mislabelled `keyId` can't widen the set). When a list is given, a badge from any other key fails;
+- it is your own key (`~/.config/sigil/key.pub.json` from `sigil keygen`);
+- online, the public index lists this server@version under the same key id (a different key id is rejected as a mismatch).
+
+Otherwise (offline, index unreachable, or not indexed) `verify` exits `1` with `untrusted signer`. `--allow-untrusted` accepts it with an `UNVERIFIED` warning. Library users: `verifyBadge(badge, { trustedKeyIds })` returns `trustedSigner: true|false`; without `trustedKeyIds` it checks integrity only and leaves `trustedSigner` undefined.
+
+```bash
+sigil verify server.trust.json --offline --trusted-keys maintainer.pub.json
+SIGIL_TRUSTED_KEYS=0123456789abcdef sigil verify server.trust.json --offline
+```
+
+Exit codes: `0` passed the gate (or the command succeeded), `2` risk at or above `--fail-on` or a revoked badge on verify, `1` operational error, invalid badge, or untrusted signer on verify.
 
 ## Trust Index
 

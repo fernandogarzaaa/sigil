@@ -99,6 +99,64 @@ export interface TrustRevocation {
 export interface VerifyResult {
 	readonly ok: boolean;
 	readonly reason: string;
+	/**
+	 * Whether the signing key is one the verifier trusts. `undefined` when
+	 * no trusted key set was supplied: the signature then only proves the
+	 * badge was not altered after signing, NOT who signed it (anyone can
+	 * generate a key and sign a "passed" badge).
+	 */
+	readonly trustedSigner?: boolean;
+}
+
+export interface VerifyOptions {
+	/**
+	 * Key ids (16 hex chars, sha256 of the canonical public JWK) whose
+	 * signatures are accepted. When given, a badge signed by any other key
+	 * fails verification.
+	 */
+	readonly trustedKeyIds?: Iterable<string>;
+}
+
+/**
+ * Parse a trusted-keys source: a JSON array of key ids or public-key files'
+ * contents ({keyId, publicKey}), a single such object, or a newline/comma
+ * separated list of key ids. A {publicKey} entry is re-derived to its key id
+ * so a mislabelled keyId cannot widen the set.
+ */
+export function parseTrustedKeys(text: string): Set<string> {
+	const ids = new Set<string>();
+	const addEntry = (entry: unknown): void => {
+		if (typeof entry === "string") {
+			const id = entry.trim().toLowerCase();
+			if (/^[0-9a-f]{16}$/.test(id)) ids.add(id);
+			else if (id) throw new Error(`invalid key id "${entry}"`);
+			return;
+		}
+		if (entry && typeof entry === "object") {
+			const pk = (entry as { publicKey?: unknown }).publicKey;
+			if (pk && typeof pk === "object") {
+				ids.add(sha256Hex(canonicalize(pk)).slice(0, 16));
+				return;
+			}
+			const kid = (entry as { keyId?: unknown }).keyId;
+			if (typeof kid === "string") {
+				addEntry(kid);
+				return;
+			}
+		}
+		throw new Error(
+			"trusted key entries must be key ids or {publicKey} objects",
+		);
+	};
+	const trimmed = text.trim();
+	if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+		const parsed: unknown = JSON.parse(trimmed);
+		for (const entry of Array.isArray(parsed) ? parsed : [parsed])
+			addEntry(entry);
+	} else {
+		for (const part of trimmed.split(/[\s,]+/)) if (part) addEntry(part);
+	}
+	return ids;
 }
 
 /** Canonical JSON: object keys sorted recursively, no whitespace. */
@@ -290,7 +348,10 @@ export function signBadge(report: TrustReport, keyPath?: string): TrustBadge {
 }
 
 /** Verify a badge's evalHash and signature. Returns ok=false with a reason on any failure. */
-export function verifyBadge(badge: TrustBadge): VerifyResult {
+export function verifyBadge(
+	badge: TrustBadge,
+	options: VerifyOptions = {},
+): VerifyResult {
 	if (
 		!badge ||
 		(badge.type !== BADGE_TYPE && badge.type !== LEGACY_BADGE_TYPE)
@@ -345,6 +406,24 @@ export function verifyBadge(badge: TrustBadge): VerifyResult {
 		return {
 			ok: false,
 			reason: "signature does not verify against the embedded public key",
+		};
+	}
+	if (options.trustedKeyIds !== undefined) {
+		const trusted = new Set(
+			Array.from(options.trustedKeyIds, (id) => id.toLowerCase()),
+		);
+		if (!trusted.has(badge.keyId.toLowerCase())) {
+			return {
+				ok: false,
+				trustedSigner: false,
+				reason: `signature is valid but key ${badge.keyId} is not in the trusted key set`,
+			};
+		}
+		return {
+			ok: true,
+			trustedSigner: true,
+			reason:
+				"signature valid from a trusted key; evalHash commits to the scored content",
 		};
 	}
 	return {

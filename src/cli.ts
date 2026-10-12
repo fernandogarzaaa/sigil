@@ -13,6 +13,7 @@
  */
 
 import {
+	existsSync,
 	mkdtempSync,
 	readFileSync,
 	realpathSync,
@@ -39,7 +40,9 @@ import {
 } from "./report.js";
 import { classifyTarget, resolveTarget, type TargetKind } from "./resolve.js";
 import {
+	defaultPublicKeyPath,
 	keygen,
+	parseTrustedKeys,
 	signBadge,
 	signRevocation,
 	type TrustBadge,
@@ -85,9 +88,14 @@ Usage:
                       (implies --sign; needs the GitHub CLI, gh, authenticated)
 
   sigil keygen [--out <dir>]      Generate an Ed25519 signing key.
-  sigil verify <badge.json> [--offline]
-      Verify a signed trust badge. Unless --offline, also checks the badge's
-      status (active / superseded / revoked) against the public trust index.
+  sigil verify <badge.json> [--offline] [--trusted-keys <file>] [--allow-untrusted]
+      Verify a signed trust badge. The signature alone proves integrity, not
+      who signed it, so the signer must also be trusted: its key id is in
+      --trusted-keys / SIGIL_TRUSTED_KEYS (or is your own key from sigil
+      keygen), or, online, the public index lists this badge under the same
+      key. Unless --offline, also checks the badge's status (active /
+      superseded / revoked) against the public trust index.
+      --allow-untrusted accepts an unknown signer with a warning.
   sigil publish --badge <file> [--repo <owner/repo>]
       Submit a signed badge to the public trust index
       (default repo: ${INDEX_REPO}) by opening a pull request.
@@ -301,11 +309,18 @@ function cmdKeygen(rawArgs: string[]): number {
 function cmdVerify(rawArgs: string[]): Promise<number> {
 	let badgePath: string | undefined;
 	let offline = false;
+	let allowUntrusted = false;
+	const trustedFiles: string[] = [];
 	let indexUrl: string | undefined;
 	for (let i = 0; i < rawArgs.length; i++) {
 		const arg = rawArgs[i];
 		if (arg === "--offline") offline = true;
-		else if (arg === "--index-url") {
+		else if (arg === "--allow-untrusted") allowUntrusted = true;
+		else if (arg === "--trusted-keys") {
+			const file = rawArgs[++i];
+			if (file === undefined) throw new Error("--trusted-keys needs a file");
+			trustedFiles.push(file);
+		} else if (arg === "--index-url") {
 			indexUrl = rawArgs[++i];
 			if (indexUrl === undefined) throw new Error("--index-url needs a URL");
 		} else if (arg?.startsWith("--")) {
@@ -322,7 +337,11 @@ function cmdVerify(rawArgs: string[]): Promise<number> {
 	const badge = JSON.parse(
 		readFileSync(resolve(badgePath), "utf8"),
 	) as TrustBadge;
-	const result = verifyBadge(badge);
+	const trusted = loadTrustedKeys(trustedFiles);
+	const result = verifyBadge(
+		badge,
+		trusted.size > 0 ? { trustedKeyIds: trusted } : {},
+	);
 	if (!result.ok) {
 		console.error(`invalid badge: ${result.reason}`);
 		return Promise.resolve(1);
@@ -330,7 +349,28 @@ function cmdVerify(rawArgs: string[]): Promise<number> {
 	console.log(
 		`valid badge: ${badge.server}@${badge.version} risk ${badge.riskScore}/100 (${badge.riskLevel}), key ${badge.keyId}`,
 	);
-	if (offline) return Promise.resolve(0);
+	const signerTrusted = result.trustedSigner === true;
+	if (signerTrusted) console.log(`signer: trusted key ${badge.keyId}`);
+	// Without a trusted key, the signature only proves integrity. Identity
+	// then has to come from the index (online) or be waived explicitly.
+	const untrusted = (why: string): number => {
+		if (allowUntrusted) {
+			console.log(
+				`warning: signer ${badge.keyId} is UNVERIFIED (${why}); accepted because of --allow-untrusted`,
+			);
+			return 0;
+		}
+		console.error(
+			`untrusted signer: key ${badge.keyId} is not in your trusted keys and ${why}. ` +
+				"Pass --trusted-keys <file> (or SIGIL_TRUSTED_KEYS), verify online against the index, or use --allow-untrusted.",
+		);
+		return 1;
+	};
+	if (offline) {
+		return Promise.resolve(
+			signerTrusted ? 0 : untrusted("--offline skips the index identity check"),
+		);
+	}
 	// Index status check: revoked badges must not be trusted.
 	return (async () => {
 		let manifest: IndexManifest | undefined;
@@ -340,14 +380,22 @@ function cmdVerify(rawArgs: string[]): Promise<number> {
 			console.log(
 				`(trust index unreachable; local verification only: ${error instanceof Error ? error.message : String(error)})`,
 			);
-			return 0;
+			return signerTrusted ? 0 : untrusted("the trust index is unreachable");
 		}
 		const entry = manifest.badges.find(
 			(b) => b.server === badge.server && b.version === badge.version,
 		);
 		if (!entry) {
 			console.log("(not indexed; local verification only)");
-			return 0;
+			return signerTrusted
+				? 0
+				: untrusted("the badge is not on the trust index");
+		}
+		if (entry.keyId !== badge.keyId) {
+			console.error(
+				`key mismatch: the index lists ${badge.server}@${badge.version} under key ${entry.keyId}, but this badge is signed by ${badge.keyId}`,
+			);
+			return 1;
 		}
 		if (entry.status === "revoked") {
 			const reason = entry.revocationReason
@@ -367,6 +415,32 @@ function cmdVerify(rawArgs: string[]): Promise<number> {
 		}
 		return 0;
 	})();
+}
+
+/**
+ * Trusted signer key ids: --trusted-keys files, SIGIL_TRUSTED_KEYS (a list
+ * of key ids, or a path to a file), and the user's own public key from
+ * `sigil keygen` if present.
+ */
+function loadTrustedKeys(files: readonly string[]): Set<string> {
+	const ids = new Set<string>();
+	const addFrom = (text: string): void => {
+		for (const id of parseTrustedKeys(text)) ids.add(id);
+	};
+	for (const file of files) addFrom(readFileSync(resolve(file), "utf8"));
+	const env = process.env.SIGIL_TRUSTED_KEYS?.trim();
+	if (env) {
+		addFrom(existsSync(env) ? readFileSync(env, "utf8") : env);
+	}
+	const own = defaultPublicKeyPath();
+	if (existsSync(own)) {
+		try {
+			addFrom(readFileSync(own, "utf8"));
+		} catch {
+			// an unreadable own key just isn't trusted
+		}
+	}
+	return ids;
 }
 
 function parseServerAtVersion(raw: string): {

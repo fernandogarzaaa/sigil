@@ -5,6 +5,12 @@ All notable changes to Sigil are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-13
+
+Minor bump because `sigil verify` now refuses untrusted signers by default
+(see Security). Covers everything since 0.1.0; npm `sigil-mcp@0.1.1`
+(2026-10-04) was published from an untagged commit in this range.
+
 ### Security
 - `sigil verify` no longer treats a valid signature as proof of who signed
   a badge. The signer must be trusted: listed via `--trusted-keys <file>` /

@@ -5,6 +5,17 @@ All notable changes to Sigil are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+- `sigil verify` no longer treats a valid signature as proof of who signed
+  a badge. The signer must be trusted: listed via `--trusted-keys <file>` /
+  `SIGIL_TRUSTED_KEYS`, your own `sigil keygen` key, or (online) indexed
+  under the same key id. Unknown signers exit 1 unless `--allow-untrusted`
+  is passed (prints an UNVERIFIED warning). An index entry whose key id
+  differs from the badge's is rejected. **Behaviour change** for offline or
+  unindexed verification.
+- `verifyBadge(badge, { trustedKeyIds })` and `parseTrustedKeys()` added to
+  the library API; `VerifyResult.trustedSigner` reports the outcome.
+
 ### Fixed
 - Scanning a package whose `bin` map lists a CLI before the MCP server
   (e.g. `{"godmode": ..., "godmode-mcp": ...}`) no longer spawns the CLI:
